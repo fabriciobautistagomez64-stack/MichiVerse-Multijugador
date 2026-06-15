@@ -1,55 +1,49 @@
-const express = require("express");
-const crypto = require("crypto");
+const express = require("express")
 
-const app = express();
-app.use(express.json());
+const app = express()
+app.use(express.json())
 
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 3000
 
-const WORLD_SEED = crypto.randomInt(1, 1000000000);
+const WORLD_SEED = Math.floor(Math.random() * 999999999)
 
-const players = {};
-const chat = [];
+const players = {}
+const chat = []
 
 function now() {
-    return Date.now();
+    return Date.now()
 }
 
 function isOnline(player) {
-    return (now() - player.lastPing) < 10000;
+    return (now() - player.lastPing) < 10000
 }
 
-function pushChatMessage(username, message) {
-    chat.push({
-        username: String(username || "Guest"),
-        message: String(message || "").slice(0, 200),
-        time: now()
-    });
+function pushChat(msg) {
+    chat.push(msg)
 
     if (chat.length > 50) {
-        chat.shift();
+        chat.splice(0, chat.length - 50)
     }
 }
 
 app.get("/", (req, res) => {
-    res.send("Michiverse Multiplayer Online");
-});
+    res.send("Michiverse Multiplayer Online")
+})
 
 app.get("/world", (req, res) => {
     res.json({
         ok: true,
         seed: WORLD_SEED
-    });
-});
+    })
+})
 
 app.post("/join", (req, res) => {
-    const id = String(req.body.id || "");
-    const username = String(req.body.username || "Guest").slice(0, 24);
+
+    const id = String(req.body.id || "")
+    const username = String(req.body.username || "Guest")
 
     if (id === "") {
-        return res.status(400).json({
-            error: "Missing id"
-        });
+        return res.status(400).json({ error: "Missing id" })
     }
 
     players[id] = {
@@ -60,113 +54,129 @@ app.post("/join", (req, res) => {
         z: 0,
         rotY: 0,
         lastPing: now()
-    };
+    }
 
-    console.log(username + " joined");
+    pushChat({
+        type: "system",
+        text: `${username} joined`
+    })
 
     res.json({
         ok: true,
         seed: WORLD_SEED
-    });
-});
-
-app.post("/update", (req, res) => {
-    const id = String(req.body.id || "");
-
-    if (!players[id]) {
-        return res.status(404).json({
-            error: "Player not found"
-        });
-    }
-
-    players[id].x = Number(req.body.x || 0);
-    players[id].y = Number(req.body.y || 0);
-    players[id].z = Number(req.body.z || 0);
-    players[id].rotY = Number(req.body.rotY || 0);
-    players[id].lastPing = now();
-
-    res.json({
-        ok: true
-    });
-});
+    })
+})
 
 app.post("/leave", (req, res) => {
-    const id = String(req.body.id || "");
+
+    const id = String(req.body.id || "")
 
     if (players[id]) {
-        console.log(players[id].username + " left");
-        delete players[id];
+
+        pushChat({
+            type: "system",
+            text: `${players[id].username} left`
+        })
+
+        delete players[id]
     }
 
-    res.json({
-        ok: true
-    });
-});
+    res.json({ ok: true })
+})
+
+app.post("/update", (req, res) => {
+
+    const id = String(req.body.id || "")
+
+    if (!players[id]) {
+        return res.status(404).json({ error: "Player not found" })
+    }
+
+    players[id].x = Number(req.body.x || 0)
+    players[id].y = Number(req.body.y || 0)
+    players[id].z = Number(req.body.z || 0)
+    players[id].rotY = Number(req.body.rotY || 0)
+    players[id].lastPing = now()
+
+    res.json({ ok: true })
+})
 
 app.get("/players", (req, res) => {
-    const result = [];
+
+    const result = []
 
     for (const id in players) {
-        const player = players[id];
 
-        if (!isOnline(player)) {
-            continue;
-        }
+        const p = players[id]
+
+        if (!isOnline(p)) continue
 
         result.push({
-            id: player.id,
-            username: player.username,
-            x: player.x,
-            y: player.y,
-            z: player.z,
-            rotY: player.rotY
-        });
+            id: p.id,
+            username: p.username,
+            x: p.x,
+            y: p.y,
+            z: p.z,
+            rotY: p.rotY
+        })
     }
 
     res.json({
         ok: true,
         players: result
-    });
-});
+    })
+})
 
-app.post("/chat/send", (req, res) => {
-    const id = String(req.body.id || "");
-    const username = String(req.body.username || "Guest").slice(0, 24);
-    const message = String(req.body.message || "").trim().slice(0, 200);
+app.post("/chat", (req, res) => {
 
-    if (id === "" || message === "") {
-        return res.status(400).json({
-            error: "Invalid message"
-        });
+    const id = String(req.body.id || "")
+    const text = String(req.body.text || "")
+
+    if (!players[id]) {
+        return res.status(404).json({ error: "Player not found" })
     }
 
-    if (players[id]) {
-        players[id].lastPing = now();
+    if (text.trim() === "") {
+        return res.json({ ok: false, error: "Empty message" })
     }
 
-    pushChatMessage(username, message);
+    const msg = {
+        id,
+        username: players[id].username,
+        text,
+        time: now()
+    }
 
-    res.json({
-        ok: true
-    });
-});
+    pushChat(msg)
+
+    res.json({ ok: true })
+})
 
 app.get("/chat", (req, res) => {
     res.json({
         ok: true,
-        chat
-    });
-});
+        messages: chat
+    })
+})
 
 setInterval(() => {
+
     for (const id in players) {
+
         if (!isOnline(players[id])) {
-            console.log(players[id].username + " timed out");
-            delete players[id];
+
+            pushChat({
+                type: "system",
+                text: `${players[id].username} timed out`
+            })
+
+            delete players[id]
         }
     }
-}, 5000);
+
+}, 5000)
 
 app.listen(PORT, () => {
-    console.log("Michiverse Multiplayer running on port " + PORT);
-});
+    console.log("Michiverse Multiplayer running on port " + PORT)
+    console.log("World seed:", WORLD_SEED)
+})
