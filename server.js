@@ -1,3 +1,4 @@
+
 const express = require("express")
 
 const app = express()
@@ -25,6 +26,22 @@ function pushChat(msg) {
         chat.splice(0, chat.length - 50)
     }
 }
+
+const joinTexts = [
+    "entro al servidor",
+    "apareció en el Michiverse",
+    "spawned en el mundo",
+    "se conectó",
+    "entró al caos digital"
+]
+
+const leaveTexts = [
+    "abandonó el servidor",
+    "se desconectó",
+    "salió del Michiverse",
+    "desapareció",
+    "se fue a dormir 😴"
+]
 
 app.get("/", (req, res) => {
     res.send("Michiverse Multiplayer Online")
@@ -57,9 +74,12 @@ app.post("/join", (req, res) => {
     }
 
     pushChat({
-        type: "system",
-        text: `${username} joined`
+        type: "join",
+        username,
+        text: joinTexts[Math.floor(Math.random() * joinTexts.length)]
     })
+
+    console.log(username + " joined")
 
     res.json({
         ok: true,
@@ -74,9 +94,12 @@ app.post("/leave", (req, res) => {
     if (players[id]) {
 
         pushChat({
-            type: "system",
-            text: `${players[id].username} left`
+            type: "leave",
+            username: players[id].username,
+            text: leaveTexts[Math.floor(Math.random() * leaveTexts.length)]
         })
+
+        console.log(players[id].username + " left")
 
         delete players[id]
     }
@@ -137,17 +160,15 @@ app.post("/chat", (req, res) => {
     }
 
     if (text.trim() === "") {
-        return res.json({ ok: false, error: "Empty message" })
+        return res.json({ ok: false })
     }
 
-    const msg = {
-        id,
+    pushChat({
+        type: "chat",
         username: players[id].username,
-        text,
+        text: text.slice(0, 200),
         time: now()
-    }
-
-    pushChat(msg)
+    })
 
     res.json({ ok: true })
 })
@@ -166,8 +187,9 @@ setInterval(() => {
         if (!isOnline(players[id])) {
 
             pushChat({
-                type: "system",
-                text: `${players[id].username} timed out`
+                type: "leave",
+                username: players[id].username,
+                text: "abandonó el servidor (timeout)"
             })
 
             delete players[id]
