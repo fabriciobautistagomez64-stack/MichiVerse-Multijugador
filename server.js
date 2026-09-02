@@ -8,20 +8,36 @@ app.use(express.json())
 const PORT = process.env.PORT || 3000
 const WORLD_SEED = Math.floor(Math.random() * 9999999)
 
+const WORLD_TIME_MAX = 500
+const WORLD_TIME_SPEED = 1.0
+const PLAYER_TIMEOUT = 30000
+
+const WEATHER_TYPES = [
+    "soleado",
+    "nublado",
+    "lluvia"
+]
+
 const players = {}
 const chat = []
 const sockets = new Map()
+
+let worldTime = 0
+let weather = "soleado"
+let weatherTimer = 0
+let nextWeatherChange = 60000 + Math.random() * 120000
 
 function now() {
     return Date.now()
 }
 
 function isOnline(player) {
-    return (now() - player.lastPing) < 10000
+    return (now() - player.lastPing) < PLAYER_TIMEOUT
 }
 
 function pushChat(message) {
     chat.push(message)
+
     if (chat.length > 50) {
         chat.shift()
     }
@@ -32,7 +48,10 @@ function getPlayersArray() {
 
     for (const id in players) {
         const p = players[id]
-        if (!isOnline(p)) continue
+
+        if (!isOnline(p)) {
+            continue
+        }
 
         result.push({
             id: p.id,
@@ -52,6 +71,8 @@ function getStatePayload() {
         type: "state",
         ok: true,
         seed: WORLD_SEED,
+        time: Math.floor(worldTime),
+        weather,
         players: getPlayersArray(),
         chat
     })
@@ -67,10 +88,14 @@ function broadcastState() {
     }
 }
 
-function cleanupPlayer(id, reasonText) {
-    if (!players[id]) return
+function cleanupPlayer(id, reasonText, notifyClient = true) {
+    if (!players[id]) {
+        return
+    }
 
-    const name = players[id].username
+    const player = players[id]
+    const name = player.username
+    const ws = sockets.get(id)
 
     pushChat({
         type: "leave",
@@ -82,8 +107,18 @@ function cleanupPlayer(id, reasonText) {
 
     delete players[id]
 
-    const ws = sockets.get(id)
     if (ws) {
+        if (notifyClient && ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({
+                type: "kicked",
+                reason: reasonText || "Desconectado del servidor"
+            }))
+        }
+
+        if (ws.readyState === WebSocket.OPEN) {
+            ws.close(1000, "Disconnected")
+        }
+
         ws.id = null
         sockets.delete(id)
     }
@@ -91,7 +126,25 @@ function cleanupPlayer(id, reasonText) {
     broadcastState()
 }
 
+function createPlayer(id, username, oldPlayer = null) {
+    return {
+        id,
+        username,
+        x: oldPlayer ? oldPlayer.x : 0,
+        y: oldPlayer ? oldPlayer.y : 80,
+        z: oldPlayer ? oldPlayer.z : 0,
+        rotY: oldPlayer ? oldPlayer.rotY : 0,
+        lastPing: now()
+    }
+}
+
+function randomWeather() {
+    const index = Math.floor(Math.random() * WEATHER_TYPES.length)
+    return WEATHER_TYPES[index]
+}
+
 const server = http.createServer(app)
+
 const wss = new WebSocket.Server({
     server,
     path: "/ws"
@@ -102,28 +155,33 @@ app.get("/", (req, res) => {
 })
 
 app.get("/world", (req, res) => {
-    res.json({ ok: true, seed: WORLD_SEED })
+    res.json({
+        ok: true,
+        seed: WORLD_SEED,
+        time: Math.floor(worldTime),
+        weather
+    })
 })
 
 app.post("/join", (req, res) => {
     const id = String(req.body.id || "")
     const username = String(req.body.username || "Guest")
 
-    if (!id) return res.status(400).json({ error: "Missing id" })
-
-    const exists = !!players[id]
-
-    players[id] = {
-        id,
-        username,
-        x: exists ? players[id].x : 0,
-        y: exists ? players[id].y : 80,
-        z: exists ? players[id].z : 0,
-        rotY: exists ? players[id].rotY : 0,
-        lastPing: now()
+    if (!id) {
+        return res.status(400).json({
+            error: "Missing id"
+        })
     }
 
-    if (!exists) {
+    const oldPlayer = players[id]
+
+    players[id] = createPlayer(
+        id,
+        username,
+        oldPlayer
+    )
+
+    if (!oldPlayer) {
         pushChat({
             type: "join",
             user: username,
@@ -134,23 +192,39 @@ app.post("/join", (req, res) => {
     }
 
     broadcastState()
-    res.json({ ok: true, seed: WORLD_SEED })
+
+    res.json({
+        ok: true,
+        seed: WORLD_SEED,
+        time: Math.floor(worldTime),
+        weather
+    })
 })
 
 app.post("/leave", (req, res) => {
     const id = String(req.body.id || "")
 
     if (players[id]) {
-        cleanupPlayer(id, `${players[id].username} salió del servidor`)
+        cleanupPlayer(
+            id,
+            `${players[id].username} salió del servidor`,
+            true
+        )
     }
 
-    res.json({ ok: true })
+    res.json({
+        ok: true
+    })
 })
 
 app.post("/update", (req, res) => {
     const id = String(req.body.id || "")
 
-    if (!players[id]) return res.status(404).json({ error: "Player not found" })
+    if (!players[id]) {
+        return res.status(404).json({
+            error: "Player not found"
+        })
+    }
 
     players[id].x = Number(req.body.x || 0)
     players[id].y = Number(req.body.y || 0)
@@ -159,23 +233,43 @@ app.post("/update", (req, res) => {
     players[id].lastPing = now()
 
     broadcastState()
-    res.json({ ok: true })
+
+    res.json({
+        ok: true
+    })
 })
 
 app.get("/players", (req, res) => {
-    res.json({ ok: true, players: getPlayersArray() })
+    res.json({
+        ok: true,
+        players: getPlayersArray()
+    })
 })
 
 app.get("/chat", (req, res) => {
-    res.json({ ok: true, chat })
+    res.json({
+        ok: true,
+        chat
+    })
 })
 
 app.post("/chat", (req, res) => {
     const id = String(req.body.id || "")
     const text = String(req.body.text || "")
 
-    if (!players[id]) return res.status(404).json({ error: "Player not found" })
-    if (!text.trim()) return res.json({ ok: false })
+    if (!players[id]) {
+        return res.status(404).json({
+            error: "Player not found"
+        })
+    }
+
+    if (!text.trim()) {
+        return res.json({
+            ok: false
+        })
+    }
+
+    players[id].lastPing = now()
 
     const msg = {
         type: "chat",
@@ -188,7 +282,9 @@ app.post("/chat", (req, res) => {
     pushChat(msg)
     broadcastState()
 
-    res.json({ ok: true })
+    res.json({
+        ok: true
+    })
 })
 
 wss.on("connection", (ws) => {
@@ -198,19 +294,27 @@ wss.on("connection", (ws) => {
 
     ws.on("message", (raw) => {
         let data
+
         try {
             data = JSON.parse(raw.toString())
         } catch {
             return
         }
 
-        if (!data || typeof data !== "object") return
+        if (!data || typeof data !== "object") {
+            return
+        }
 
         if (data.type === "ping") {
             if (ws.id && players[ws.id]) {
                 players[ws.id].lastPing = now()
             }
-            ws.send(JSON.stringify({ type: "pong", time: now() }))
+
+            ws.send(JSON.stringify({
+                type: "pong",
+                time: now()
+            }))
+
             return
         }
 
@@ -218,22 +322,39 @@ wss.on("connection", (ws) => {
             const id = String(data.id || "")
             const username = String(data.username || "Guest")
 
-            if (!id) return
+            if (!id) {
+                return
+            }
+
+            const oldSocket = sockets.get(id)
+
+            if (oldSocket && oldSocket !== ws) {
+                if (oldSocket.readyState === WebSocket.OPEN) {
+                    oldSocket.send(JSON.stringify({
+                        type: "kicked",
+                        reason: "Conectado desde otra sesión"
+                    }))
+
+                    oldSocket.close(
+                        1000,
+                        "Another session connected"
+                    )
+                }
+
+                oldSocket.id = null
+                sockets.delete(id)
+            }
 
             ws.id = id
             sockets.set(id, ws)
 
             const existed = !!players[id]
 
-            players[id] = {
+            players[id] = createPlayer(
                 id,
                 username,
-                x: existed ? players[id].x : 0,
-                y: existed ? players[id].y : 80,
-                z: existed ? players[id].z : 0,
-                rotY: existed ? players[id].rotY : 0,
-                lastPing: now()
-            }
+                existed ? players[id] : null
+            )
 
             if (!existed) {
                 pushChat({
@@ -245,13 +366,18 @@ wss.on("connection", (ws) => {
                 })
             }
 
+            ws.send(getStatePayload())
             broadcastState()
+
             return
         }
 
         if (data.type === "move") {
             const id = ws.id || String(data.id || "")
-            if (!id || !players[id]) return
+
+            if (!id || !players[id]) {
+                return
+            }
 
             players[id].x = Number(data.x || 0)
             players[id].y = Number(data.y || 0)
@@ -260,6 +386,7 @@ wss.on("connection", (ws) => {
             players[id].lastPing = now()
 
             broadcastState()
+
             return
         }
 
@@ -267,8 +394,15 @@ wss.on("connection", (ws) => {
             const id = ws.id || String(data.id || "")
             const text = String(data.text || "")
 
-            if (!id || !players[id]) return
-            if (!text.trim()) return
+            if (!id || !players[id]) {
+                return
+            }
+
+            if (!text.trim()) {
+                return
+            }
+
+            players[id].lastPing = now()
 
             const msg = {
                 type: "chat",
@@ -280,29 +414,118 @@ wss.on("connection", (ws) => {
 
             pushChat(msg)
             broadcastState()
+
             return
         }
 
         if (data.type === "leave") {
             const id = ws.id || String(data.id || "")
-            if (!id || !players[id]) return
-            cleanupPlayer(id, `${players[id].username} salió del servidor`)
+
+            if (!id || !players[id]) {
+                return
+            }
+
+            cleanupPlayer(
+                id,
+                `${players[id].username} salió del servidor`,
+                false
+            )
+
             return
         }
     })
 
     ws.on("close", () => {
-        if (!ws.id) return
-        if (!players[ws.id]) return
+        if (!ws.id) {
+            return
+        }
 
-        cleanupPlayer(ws.id, `${players[ws.id].username} salió del servidor`)
+        const id = ws.id
+
+        if (!players[id]) {
+            sockets.delete(id)
+            return
+        }
+
+        const currentSocket = sockets.get(id)
+
+        if (currentSocket !== ws) {
+            return
+        }
+
+        cleanupPlayer(
+            id,
+            `${players[id].username} salió del servidor`,
+            false
+        )
+    })
+
+    ws.on("error", () => {
+        if (!ws.id) {
+            return
+        }
+
+        const id = ws.id
+
+        if (!players[id]) {
+            sockets.delete(id)
+            return
+        }
+
+        const currentSocket = sockets.get(id)
+
+        if (currentSocket !== ws) {
+            return
+        }
+
+        cleanupPlayer(
+            id,
+            `${players[id].username} perdió la conexión`,
+            false
+        )
     })
 })
 
 setInterval(() => {
+    worldTime += WORLD_TIME_SPEED
+
+    if (worldTime >= WORLD_TIME_MAX) {
+        worldTime = 0
+    }
+
+    broadcastState()
+}, 1000)
+
+setInterval(() => {
+    weatherTimer += 5000
+
+    if (weatherTimer < nextWeatherChange) {
+        return
+    }
+
+    weatherTimer = 0
+    weather = randomWeather()
+    nextWeatherChange = 60000 + Math.random() * 120000
+
+    pushChat({
+        type: "weather",
+        user: "Mundo",
+        text: `El clima cambió a ${weather}`,
+        color: "gray",
+        time: now()
+    })
+
+    broadcastState()
+}, 5000)
+
+setInterval(() => {
     for (const id in players) {
         if (!isOnline(players[id])) {
-            cleanupPlayer(id, `${players[id].username} se desconectó`)
+            cleanupPlayer(
+                id,
+                `${players[id].username} se desconectó por inactividad`,
+                true
+            )
         }
     }
 }, 5000)
