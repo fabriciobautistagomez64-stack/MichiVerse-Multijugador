@@ -6,6 +6,7 @@ const app = express()
 app.use(express.json())
 
 const PORT = process.env.PORT || 3000
+
 const WORLD_SEED = Math.floor(Math.random() * 9999999)
 
 const WORLD_TIME_MAX = 500
@@ -22,13 +23,21 @@ const players = {}
 const chat = []
 const sockets = new Map()
 
-let worldTime = 0
+const modifiedBlocks = new Map()
+
 let weather = "soleado"
 let weatherTimer = 0
 let nextWeatherChange = 60000 + Math.random() * 120000
 
+const worldStartTime = Date.now()
+
 function now() {
     return Date.now()
+}
+
+function getWorldTime() {
+    const elapsedSeconds = (Date.now() - worldStartTime) / 1000
+    return (elapsedSeconds * WORLD_TIME_SPEED) % WORLD_TIME_MAX
 }
 
 function isOnline(player) {
@@ -66,15 +75,22 @@ function getPlayersArray() {
     return result
 }
 
+function getModifiedBlocksArray() {
+    return Array.from(modifiedBlocks.values())
+}
+
 function getStatePayload() {
     return JSON.stringify({
         type: "state",
         ok: true,
         seed: WORLD_SEED,
-        time: Math.floor(worldTime),
+        time: getWorldTime(),
+        timeMax: WORLD_TIME_MAX,
+        timeSpeed: WORLD_TIME_SPEED,
         weather,
         players: getPlayersArray(),
-        chat
+        chat,
+        modifiedBlocks: getModifiedBlocksArray()
     })
 }
 
@@ -86,6 +102,37 @@ function broadcastState() {
             ws.send(payload)
         }
     }
+}
+
+function broadcast(data) {
+    const payload = JSON.stringify(data)
+
+    for (const ws of wss.clients) {
+        if (ws.readyState === WebSocket.OPEN) {
+            ws.send(payload)
+        }
+    }
+}
+
+function saveBlock(block, x, y, z) {
+    const blockData = {
+        block: String(block),
+        x: Number(x),
+        y: Number(y),
+        z: Number(z)
+    }
+
+    const key = `${blockData.x},${blockData.y},${blockData.z}`
+
+    modifiedBlocks.set(key, blockData)
+
+    return blockData
+}
+
+function removeBlock(x, y, z) {
+    const key = `${Number(x)},${Number(y)},${Number(z)}`
+
+    modifiedBlocks.delete(key)
 }
 
 function cleanupPlayer(id, reasonText, notifyClient = true) {
@@ -158,8 +205,11 @@ app.get("/world", (req, res) => {
     res.json({
         ok: true,
         seed: WORLD_SEED,
-        time: Math.floor(worldTime),
-        weather
+        time: getWorldTime(),
+        timeMax: WORLD_TIME_MAX,
+        timeSpeed: WORLD_TIME_SPEED,
+        weather,
+        modifiedBlocks: getModifiedBlocksArray()
     })
 })
 
@@ -196,8 +246,11 @@ app.post("/join", (req, res) => {
     res.json({
         ok: true,
         seed: WORLD_SEED,
-        time: Math.floor(worldTime),
-        weather
+        time: getWorldTime(),
+        timeMax: WORLD_TIME_MAX,
+        timeSpeed: WORLD_TIME_SPEED,
+        weather,
+        modifiedBlocks: getModifiedBlocksArray()
     })
 })
 
@@ -287,6 +340,72 @@ app.post("/chat", (req, res) => {
     })
 })
 
+app.post("/block", (req, res) => {
+    const block = String(req.body.block || "")
+    const x = Number(req.body.x)
+    const y = Number(req.body.y)
+    const z = Number(req.body.z)
+
+    if (!block) {
+        return res.status(400).json({
+            error: "Missing block"
+        })
+    }
+
+    if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) {
+        return res.status(400).json({
+            error: "Invalid coordinates"
+        })
+    }
+
+    const blockData = saveBlock(block, x, y, z)
+
+    broadcast({
+        type: "block_modified",
+        block: blockData.block,
+        x: blockData.x,
+        y: blockData.y,
+        z: blockData.z
+    })
+
+    res.json({
+        ok: true,
+        block: blockData
+    })
+})
+
+app.post("/block/remove", (req, res) => {
+    const x = Number(req.body.x)
+    const y = Number(req.body.y)
+    const z = Number(req.body.z)
+
+    if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) {
+        return res.status(400).json({
+            error: "Invalid coordinates"
+        })
+    }
+
+    removeBlock(x, y, z)
+
+    broadcast({
+        type: "block_removed",
+        x,
+        y,
+        z
+    })
+
+    res.json({
+        ok: true
+    })
+})
+
+app.get("/blocks", (req, res) => {
+    res.json({
+        ok: true,
+        modifiedBlocks: getModifiedBlocksArray()
+    })
+})
+
 wss.on("connection", (ws) => {
     ws.id = null
 
@@ -312,7 +431,7 @@ wss.on("connection", (ws) => {
 
             ws.send(JSON.stringify({
                 type: "pong",
-                time: now()
+                time: getWorldTime()
             }))
 
             return
@@ -418,6 +537,75 @@ wss.on("connection", (ws) => {
             return
         }
 
+        if (data.type === "block") {
+            const id = ws.id || String(data.id || "")
+
+            if (!id || !players[id]) {
+                return
+            }
+
+            const block = String(data.block || "")
+            const x = Number(data.x)
+            const y = Number(data.y)
+            const z = Number(data.z)
+
+            if (!block) {
+                return
+            }
+
+            if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) {
+                return
+            }
+
+            players[id].lastPing = now()
+
+            const blockData = saveBlock(
+                block,
+                x,
+                y,
+                z
+            )
+
+            broadcast({
+                type: "block_modified",
+                block: blockData.block,
+                x: blockData.x,
+                y: blockData.y,
+                z: blockData.z
+            })
+
+            return
+        }
+
+        if (data.type === "block_remove") {
+            const id = ws.id || String(data.id || "")
+
+            if (!id || !players[id]) {
+                return
+            }
+
+            const x = Number(data.x)
+            const y = Number(data.y)
+            const z = Number(data.z)
+
+            if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) {
+                return
+            }
+
+            players[id].lastPing = now()
+
+            removeBlock(x, y, z)
+
+            broadcast({
+                type: "block_removed",
+                x,
+                y,
+                z
+            })
+
+            return
+        }
+
         if (data.type === "leave") {
             const id = ws.id || String(data.id || "")
 
@@ -487,12 +675,6 @@ wss.on("connection", (ws) => {
 })
 
 setInterval(() => {
-    worldTime += WORLD_TIME_SPEED
-
-    if (worldTime >= WORLD_TIME_MAX) {
-        worldTime = 0
-    }
-
     broadcastState()
 }, 1000)
 
