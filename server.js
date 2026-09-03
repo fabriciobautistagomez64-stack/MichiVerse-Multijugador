@@ -1,17 +1,18 @@
 const express = require("express")
 const http = require("http")
 const WebSocket = require("ws")
+const PigIA = require("./PigIA")
 
 const app = express()
-app.use(express.json())
+app.use(express.json({ limit: "2mb" }))
 
 const PORT = process.env.PORT || 3000
 
-const WORLD_SEED = Math.floor(Math.random() * 9999999)
+const WORLD_SEED = 192727828
 
 const WORLD_TIME_MAX = 500
 const WORLD_TIME_SPEED = 1.0
-const PLAYER_TIMEOUT = 30000
+const PLAYER_TIMEOUT = 120000
 
 const WEATHER_TYPES = [
     "soleado",
@@ -19,25 +20,25 @@ const WEATHER_TYPES = [
     "lluvia"
 ]
 
+const PIG_UPDATE_INTERVAL = 250
+const PIG_SPAWN_INTERVAL = 8000
+const MAX_PIGS = 32
+
 const players = {}
 const chat = []
 const sockets = new Map()
-
 const modifiedBlocks = new Map()
 
+const pigIA = new PigIA()
+
+let worldTime = 0
 let weather = "soleado"
 let weatherTimer = 0
 let nextWeatherChange = 60000 + Math.random() * 120000
-
-const worldStartTime = Date.now()
+let pigSpawnTimer = 0
 
 function now() {
     return Date.now()
-}
-
-function getWorldTime() {
-    const elapsedSeconds = (Date.now() - worldStartTime) / 1000
-    return (elapsedSeconds * WORLD_TIME_SPEED) % WORLD_TIME_MAX
 }
 
 function isOnline(player) {
@@ -75,7 +76,7 @@ function getPlayersArray() {
     return result
 }
 
-function getModifiedBlocksArray() {
+function getBlocksArray() {
     return Array.from(modifiedBlocks.values())
 }
 
@@ -84,28 +85,38 @@ function getStatePayload() {
         type: "state",
         ok: true,
         seed: WORLD_SEED,
-        time: getWorldTime(),
-        timeMax: WORLD_TIME_MAX,
-        timeSpeed: WORLD_TIME_SPEED,
+        time: Math.floor(worldTime),
+        worldTime: Math.floor(worldTime),
         weather,
         players: getPlayersArray(),
         chat,
-        modifiedBlocks: getModifiedBlocksArray()
+        blocks: getBlocksArray(),
+        pigs: pigIA.getPigs()
     })
 }
 
-function broadcastState() {
-    const payload = getStatePayload()
+function getJoinPayload() {
+    return JSON.stringify({
+        type: "join_ok",
+        ok: true,
+        seed: WORLD_SEED,
+        time: Math.floor(worldTime),
+        worldTime: Math.floor(worldTime),
+        weather,
+        chat,
+        blocks: getBlocksArray(),
+        pigs: pigIA.getPigs()
+    })
+}
 
-    for (const ws of wss.clients) {
-        if (ws.readyState === WebSocket.OPEN) {
-            ws.send(payload)
-        }
-    }
+function getBlockKey(x, y, z) {
+    return `${x}:${y}:${z}`
 }
 
 function broadcast(data) {
-    const payload = JSON.stringify(data)
+    const payload = typeof data === "string"
+        ? data
+        : JSON.stringify(data)
 
     for (const ws of wss.clients) {
         if (ws.readyState === WebSocket.OPEN) {
@@ -114,25 +125,19 @@ function broadcast(data) {
     }
 }
 
-function saveBlock(block, x, y, z) {
-    const blockData = {
-        block: String(block),
-        x: Number(x),
-        y: Number(y),
-        z: Number(z)
-    }
-
-    const key = `${blockData.x},${blockData.y},${blockData.z}`
-
-    modifiedBlocks.set(key, blockData)
-
-    return blockData
+function broadcastState() {
+    broadcast(getStatePayload())
 }
 
-function removeBlock(x, y, z) {
-    const key = `${Number(x)},${Number(y)},${Number(z)}`
+function broadcastPigs() {
+    broadcast({
+        type: "mobs",
+        mobs: pigIA.getPigs()
+    })
+}
 
-    modifiedBlocks.delete(key)
+function broadcastBlock(data) {
+    broadcast(data)
 }
 
 function cleanupPlayer(id, reasonText, notifyClient = true) {
@@ -190,6 +195,58 @@ function randomWeather() {
     return WEATHER_TYPES[index]
 }
 
+function getRandomPlayer() {
+    const online = Object.values(players).filter(isOnline)
+
+    if (online.length === 0) {
+        return null
+    }
+
+    return online[Math.floor(Math.random() * online.length)]
+}
+
+function trySpawnPig() {
+    if (pigIA.getPigCount() >= MAX_PIGS) {
+        return
+    }
+
+    const player = getRandomPlayer()
+
+    if (!player) {
+        return
+    }
+
+    const angle = Math.random() * Math.PI * 2
+    const distance = 8 + Math.random() * 16
+
+    const x = player.x + Math.cos(angle) * distance
+    const z = player.z + Math.sin(angle) * distance
+
+    const cell = pigIA.getCellAtWorld(x, z)
+
+    if (!cell) {
+        return
+    }
+
+    if (cell.value <= 0) {
+        return
+    }
+
+    const y = cell.height !== null
+        ? cell.height
+        : player.y
+
+    const pig = pigIA.spawnPig(
+        x,
+        y,
+        z
+    )
+
+    if (pig) {
+        broadcastPigs()
+    }
+}
+
 const server = http.createServer(app)
 
 const wss = new WebSocket.Server({
@@ -205,11 +262,30 @@ app.get("/world", (req, res) => {
     res.json({
         ok: true,
         seed: WORLD_SEED,
-        time: getWorldTime(),
-        timeMax: WORLD_TIME_MAX,
-        timeSpeed: WORLD_TIME_SPEED,
-        weather,
-        modifiedBlocks: getModifiedBlocksArray()
+        time: Math.floor(worldTime),
+        worldTime: Math.floor(worldTime),
+        weather
+    })
+})
+
+app.get("/players", (req, res) => {
+    res.json({
+        ok: true,
+        players: getPlayersArray()
+    })
+})
+
+app.get("/chat", (req, res) => {
+    res.json({
+        ok: true,
+        chat
+    })
+})
+
+app.get("/mobs", (req, res) => {
+    res.json({
+        ok: true,
+        mobs: pigIA.getPigs()
     })
 })
 
@@ -246,11 +322,12 @@ app.post("/join", (req, res) => {
     res.json({
         ok: true,
         seed: WORLD_SEED,
-        time: getWorldTime(),
-        timeMax: WORLD_TIME_MAX,
-        timeSpeed: WORLD_TIME_SPEED,
+        time: Math.floor(worldTime),
+        worldTime: Math.floor(worldTime),
         weather,
-        modifiedBlocks: getModifiedBlocksArray()
+        chat,
+        blocks: getBlocksArray(),
+        pigs: pigIA.getPigs()
     })
 })
 
@@ -292,20 +369,6 @@ app.post("/update", (req, res) => {
     })
 })
 
-app.get("/players", (req, res) => {
-    res.json({
-        ok: true,
-        players: getPlayersArray()
-    })
-})
-
-app.get("/chat", (req, res) => {
-    res.json({
-        ok: true,
-        chat
-    })
-})
-
 app.post("/chat", (req, res) => {
     const id = String(req.body.id || "")
     const text = String(req.body.text || "")
@@ -340,72 +403,6 @@ app.post("/chat", (req, res) => {
     })
 })
 
-app.post("/block", (req, res) => {
-    const block = String(req.body.block || "")
-    const x = Number(req.body.x)
-    const y = Number(req.body.y)
-    const z = Number(req.body.z)
-
-    if (!block) {
-        return res.status(400).json({
-            error: "Missing block"
-        })
-    }
-
-    if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) {
-        return res.status(400).json({
-            error: "Invalid coordinates"
-        })
-    }
-
-    const blockData = saveBlock(block, x, y, z)
-
-    broadcast({
-        type: "block_modified",
-        block: blockData.block,
-        x: blockData.x,
-        y: blockData.y,
-        z: blockData.z
-    })
-
-    res.json({
-        ok: true,
-        block: blockData
-    })
-})
-
-app.post("/block/remove", (req, res) => {
-    const x = Number(req.body.x)
-    const y = Number(req.body.y)
-    const z = Number(req.body.z)
-
-    if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) {
-        return res.status(400).json({
-            error: "Invalid coordinates"
-        })
-    }
-
-    removeBlock(x, y, z)
-
-    broadcast({
-        type: "block_removed",
-        x,
-        y,
-        z
-    })
-
-    res.json({
-        ok: true
-    })
-})
-
-app.get("/blocks", (req, res) => {
-    res.json({
-        ok: true,
-        modifiedBlocks: getModifiedBlocksArray()
-    })
-})
-
 wss.on("connection", (ws) => {
     ws.id = null
 
@@ -431,7 +428,9 @@ wss.on("connection", (ws) => {
 
             ws.send(JSON.stringify({
                 type: "pong",
-                time: getWorldTime()
+                time: now(),
+                worldTime: Math.floor(worldTime),
+                weather
             }))
 
             return
@@ -485,14 +484,14 @@ wss.on("connection", (ws) => {
                 })
             }
 
-            ws.send(getStatePayload())
+            ws.send(getJoinPayload())
             broadcastState()
 
             return
         }
 
         if (data.type === "move") {
-            const id = ws.id || String(data.id || "")
+            const id = ws.id
 
             if (!id || !players[id]) {
                 return
@@ -510,7 +509,7 @@ wss.on("connection", (ws) => {
         }
 
         if (data.type === "chat") {
-            const id = ws.id || String(data.id || "")
+            const id = ws.id
             const text = String(data.text || "")
 
             if (!id || !players[id]) {
@@ -537,48 +536,118 @@ wss.on("connection", (ws) => {
             return
         }
 
-        if (data.type === "block") {
-            const id = ws.id || String(data.id || "")
+        if (data.type === "terrain") {
+            const id = ws.id
 
             if (!id || !players[id]) {
                 return
             }
 
-            const block = String(data.block || "")
-            const x = Number(data.x)
-            const y = Number(data.y)
-            const z = Number(data.z)
+            const chunkX = Number(data.chunkX)
+            const chunkZ = Number(data.chunkZ)
+            const values = data.values
+            const heights = data.heights
 
-            if (!block) {
+            if (
+                !Number.isInteger(chunkX) ||
+                !Number.isInteger(chunkZ)
+            ) {
                 return
             }
 
-            if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) {
+            if (!Array.isArray(values)) {
+                return
+            }
+
+            if (values.length < 256) {
                 return
             }
 
             players[id].lastPing = now()
 
-            const blockData = saveBlock(
-                block,
-                x,
-                y,
-                z
+            pigIA.setTerrainChunk(
+                chunkX,
+                chunkZ,
+                values,
+                Array.isArray(heights) ? heights : null
             )
 
-            broadcast({
+            return
+        }
+
+        if (data.type === "terrain_remove") {
+            const id = ws.id
+
+            if (!id || !players[id]) {
+                return
+            }
+
+            const chunkX = Number(data.chunkX)
+            const chunkZ = Number(data.chunkZ)
+
+            if (
+                !Number.isInteger(chunkX) ||
+                !Number.isInteger(chunkZ)
+            ) {
+                return
+            }
+
+            players[id].lastPing = now()
+
+            pigIA.removeTerrainChunk(
+                chunkX,
+                chunkZ
+            )
+
+            return
+        }
+
+        if (data.type === "block") {
+            const id = ws.id
+
+            if (!id || !players[id]) {
+                return
+            }
+
+            const x = Number(data.x)
+            const y = Number(data.y)
+            const z = Number(data.z)
+            const blockId = Number(data.id)
+
+            if (
+                !Number.isFinite(x) ||
+                !Number.isFinite(y) ||
+                !Number.isFinite(z) ||
+                !Number.isFinite(blockId)
+            ) {
+                return
+            }
+
+            players[id].lastPing = now()
+
+            const blockData = {
                 type: "block_modified",
-                block: blockData.block,
-                x: blockData.x,
-                y: blockData.y,
-                z: blockData.z
-            })
+                x,
+                y,
+                z,
+                id: blockId,
+                removed: false,
+                player_id: id,
+                time: now()
+            }
+
+            modifiedBlocks.set(
+                getBlockKey(x, y, z),
+                blockData
+            )
+
+            broadcastBlock(blockData)
 
             return
         }
 
         if (data.type === "block_remove") {
-            const id = ws.id || String(data.id || "")
+            const id = ws.id
 
             if (!id || !players[id]) {
                 return
@@ -588,26 +657,39 @@ wss.on("connection", (ws) => {
             const y = Number(data.y)
             const z = Number(data.z)
 
-            if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) {
+            if (
+                !Number.isFinite(x) ||
+                !Number.isFinite(y) ||
+                !Number.isFinite(z)
+            ) {
                 return
             }
 
             players[id].lastPing = now()
 
-            removeBlock(x, y, z)
-
-            broadcast({
+            const blockData = {
                 type: "block_removed",
                 x,
                 y,
-                z
-            })
+                z,
+                id: 0,
+                removed: true,
+                player_id: id,
+                time: now()
+            }
+
+            modifiedBlocks.set(
+                getBlockKey(x, y, z),
+                blockData
+            )
+
+            broadcastBlock(blockData)
 
             return
         }
 
         if (data.type === "leave") {
-            const id = ws.id || String(data.id || "")
+            const id = ws.id
 
             if (!id || !players[id]) {
                 return
@@ -675,6 +757,12 @@ wss.on("connection", (ws) => {
 })
 
 setInterval(() => {
+    worldTime += WORLD_TIME_SPEED
+
+    if (worldTime >= WORLD_TIME_MAX) {
+        worldTime = 0
+    }
+
     broadcastState()
 }, 1000)
 
@@ -712,6 +800,23 @@ setInterval(() => {
     }
 }, 5000)
 
+setInterval(() => {
+    pigIA.update(PIG_UPDATE_INTERVAL / 1000)
+    broadcastPigs()
+}, PIG_UPDATE_INTERVAL)
+
+setInterval(() => {
+    pigSpawnTimer += PIG_SPAWN_INTERVAL
+
+    if (pigSpawnTimer < PIG_SPAWN_INTERVAL) {
+        return
+    }
+
+    pigSpawnTimer = 0
+    trySpawnPig()
+}, PIG_SPAWN_INTERVAL)
+
 server.listen(PORT, () => {
     console.log("Michiverse running on " + PORT)
+    console.log("World seed: " + WORLD_SEED)
 })
