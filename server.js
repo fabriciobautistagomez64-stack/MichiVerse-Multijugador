@@ -34,10 +34,21 @@ const MAX_PIGS = 32
 const DAY_START = 0
 const NIGHT_START = WORLD_TIME_MAX / 2
 
+const ACCOUNT_SERVER_URL =
+    "https://michiverse-server.onrender.com"
+
+const ACCOUNT_USER_PATH =
+    "/users/%s"
+
+const ACCOUNT_REQUEST_TIMEOUT =
+    8000
+
 const players = {}
 const chat = []
 const sockets = new Map()
 const modifiedBlocks = new Map()
+const playerNames = new Map()
+const pendingNameRequests = new Map()
 
 const pigIA = new PigIA({
     maxPigs: MAX_PIGS
@@ -82,6 +93,170 @@ function pushChat(message) {
     }
 }
 
+function getCachedPlayerName(id) {
+    const cached =
+        playerNames.get(
+            String(id)
+        )
+
+    if (
+        typeof cached === "string" &&
+        cached.trim()
+    ) {
+        return cached.trim()
+    }
+
+    return null
+}
+
+function getFallbackPlayerName(id) {
+    return `ID ${id}`
+}
+
+function getAccountUserUrl(id) {
+    const encodedId =
+        encodeURIComponent(
+            String(id)
+        )
+
+    const path =
+        ACCOUNT_USER_PATH.replace(
+            "%s",
+            encodedId
+        )
+
+    return (
+        ACCOUNT_SERVER_URL +
+        (
+            path.startsWith("/")
+                ? path
+                : "/" + path
+        )
+    )
+}
+
+async function fetchPlayerName(id) {
+    const url =
+        getAccountUserUrl(id)
+
+    const controller =
+        new AbortController()
+
+    const timeout =
+        setTimeout(
+            () => {
+                controller.abort()
+            },
+            ACCOUNT_REQUEST_TIMEOUT
+        )
+
+    try {
+        const response =
+            await fetch(
+                url,
+                {
+                    method: "GET",
+                    headers: {
+                        Accept:
+                            "application/json"
+                    },
+                    signal:
+                        controller.signal
+                }
+            )
+
+        if (!response.ok) {
+            return null
+        }
+
+        const data =
+            await response.json()
+
+        const username =
+            data &&
+            data.user &&
+            typeof data.user.username ===
+                "string"
+                ? data.user.username
+                : data &&
+                    typeof data.username ===
+                        "string"
+                    ? data.username
+                    : null
+
+        if (
+            typeof username !== "string" ||
+            !username.trim()
+        ) {
+            return null
+        }
+
+        const cleanName =
+            username.trim()
+
+        playerNames.set(
+            String(id),
+            cleanName
+        )
+
+        return cleanName
+    } catch {
+        return null
+    } finally {
+        clearTimeout(timeout)
+    }
+}
+
+async function getPlayerName(id) {
+    const stringId =
+        String(id)
+
+    const cached =
+        getCachedPlayerName(
+            stringId
+        )
+
+    if (cached) {
+        return cached
+    }
+
+    if (
+        pendingNameRequests.has(
+            stringId
+        )
+    ) {
+        return await pendingNameRequests.get(
+            stringId
+        )
+    }
+
+    const request =
+        fetchPlayerName(
+            stringId
+        ).finally(
+            () => {
+                pendingNameRequests.delete(
+                    stringId
+                )
+            }
+        )
+
+    pendingNameRequests.set(
+        stringId,
+        request
+    )
+
+    const result =
+        await request
+
+    return (
+        result ||
+        getFallbackPlayerName(
+            stringId
+        )
+    )
+}
+
 function getPlayersArray() {
     const result = []
 
@@ -96,7 +271,6 @@ function getPlayersArray() {
 
         result.push({
             id: p.id,
-            username: p.username,
             x: p.x,
             y: p.y,
             z: p.z,
@@ -197,11 +371,9 @@ function cleanupPlayer(
         return
     }
 
-    const player =
-        players[id]
-
     const name =
-        player.username
+        getCachedPlayerName(id) ||
+        getFallbackPlayerName(id)
 
     const ws =
         sockets.get(id)
@@ -259,12 +431,10 @@ function cleanupPlayer(
 
 function createPlayer(
     id,
-    username,
     oldPlayer = null
 ) {
     return {
         id,
-        username,
         x:
             oldPlayer
                 ? oldPlayer.x
@@ -483,16 +653,10 @@ app.get(
 
 app.post(
     "/join",
-    (req, res) => {
+    async (req, res) => {
         const id =
             String(
                 req.body.id || ""
-            )
-
-        const username =
-            String(
-                req.body.username ||
-                "Guest"
             )
 
         if (!id) {
@@ -504,13 +668,15 @@ app.post(
                 })
         }
 
+        const username =
+            await getPlayerName(id)
+
         const oldPlayer =
             players[id]
 
         players[id] =
             createPlayer(
                 id,
-                username,
                 oldPlayer
             )
 
@@ -557,9 +723,13 @@ app.post(
             )
 
         if (players[id]) {
+            const username =
+                getCachedPlayerName(id) ||
+                getFallbackPlayerName(id)
+
             cleanupPlayer(
                 id,
-                `${players[id].username} salió del servidor`,
+                `${username} salió del servidor`,
                 true
             )
         }
@@ -620,7 +790,7 @@ app.post(
 
 app.post(
     "/chat",
-    (req, res) => {
+    async (req, res) => {
         const id =
             String(
                 req.body.id || ""
@@ -649,10 +819,12 @@ app.post(
         players[id].lastPing =
             now()
 
+        const username =
+            await getPlayerName(id)
+
         const msg = {
             type: "chat",
-            user:
-                players[id].username,
+            user: username,
             text,
             color: "white",
             time: now()
@@ -682,7 +854,7 @@ wss.on(
 
         ws.on(
             "message",
-            raw => {
+            async raw => {
                 let data
 
                 try {
@@ -744,12 +916,6 @@ wss.on(
                                 ""
                         )
 
-                    const username =
-                        String(
-                            data.username ||
-                                "Guest"
-                        )
-
                     if (!id) {
                         return
                     }
@@ -795,7 +961,11 @@ wss.on(
                         )
                     }
 
+                    const username =
+                        await getPlayerName(id)
+
                     ws.id = id
+
                     sockets.set(
                         id,
                         ws
@@ -807,7 +977,6 @@ wss.on(
                     players[id] =
                         createPlayer(
                             id,
-                            username,
                             existed
                                 ? players[id]
                                 : null
@@ -910,11 +1079,15 @@ wss.on(
                     players[id].lastPing =
                         now()
 
+                    const username =
+                        await getPlayerName(
+                            id
+                        )
+
                     const msg = {
                         type: "chat",
                         user:
-                            players[id]
-                                .username,
+                            username,
                         text,
                         color: "white",
                         time: now()
@@ -1223,9 +1396,13 @@ wss.on(
                         return
                     }
 
+                    const username =
+                        getCachedPlayerName(id) ||
+                        getFallbackPlayerName(id)
+
                     cleanupPlayer(
                         id,
-                        `${players[id].username} salió del servidor`,
+                        `${username} salió del servidor`,
                         false
                     )
 
@@ -1266,9 +1443,13 @@ wss.on(
                     return
                 }
 
+                const username =
+                    getCachedPlayerName(id) ||
+                    getFallbackPlayerName(id)
+
                 cleanupPlayer(
                     id,
-                    `${players[id].username} salió del servidor`,
+                    `${username} salió del servidor`,
                     false
                 )
             }
@@ -1306,9 +1487,13 @@ wss.on(
                     return
                 }
 
+                const username =
+                    getCachedPlayerName(id) ||
+                    getFallbackPlayerName(id)
+
                 cleanupPlayer(
                     id,
-                    `${players[id].username} perdió la conexión`,
+                    `${username} perdió la conexión`,
                     false
                 )
             }
@@ -1381,9 +1566,13 @@ setInterval(
                     players[id]
                 )
             ) {
+                const username =
+                    getCachedPlayerName(id) ||
+                    getFallbackPlayerName(id)
+
                 cleanupPlayer(
                     id,
-                    `${players[id].username} se desconectó por inactividad`,
+                    `${username} se desconectó por inactividad`,
                     true
                 )
             }
@@ -1455,6 +1644,11 @@ server.listen(
         console.log(
             "Max pigs: " +
             MAX_PIGS
+        )
+
+        console.log(
+            "Account server: " +
+            ACCOUNT_SERVER_URL
         )
     }
 )
