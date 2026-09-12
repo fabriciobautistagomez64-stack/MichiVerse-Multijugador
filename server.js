@@ -14,7 +14,7 @@ app.use(
 const PORT =
     process.env.PORT || 3000
 
-const WORLD_SEED = 192727828
+const WORLD_SEED = 1
 
 const WORLD_TIME_MAX = 500
 const WORLD_TIME_SPEED = 1.0
