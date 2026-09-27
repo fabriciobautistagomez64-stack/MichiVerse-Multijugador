@@ -310,6 +310,7 @@ function getJoinPayload() {
         time: Math.floor(worldTime),
         worldTime: Math.floor(worldTime),
         weather,
+        players: getPlayersArray(),
         chat,
         blocks: getBlocksArray(),
         pigs: pigIA.getPigs()
@@ -349,6 +350,13 @@ function broadcastState() {
     broadcast(
         getStatePayload()
     )
+}
+
+function broadcastPlayers() {
+    broadcast({
+        type: "players",
+        players: getPlayersArray()
+    })
 }
 
 function broadcastPigs() {
@@ -705,6 +713,8 @@ app.post(
                     worldTime
                 ),
             weather,
+            players:
+                getPlayersArray(),
             chat,
             blocks:
                 getBlocksArray(),
@@ -780,7 +790,7 @@ app.post(
         players[id].lastPing =
             now()
 
-        broadcastState()
+        broadcastPlayers()
 
         res.json({
             ok: true
@@ -1021,31 +1031,59 @@ wss.on(
                         return
                     }
 
-                    players[id].x =
+                    const x =
                         Number(
-                            data.x || 0
+                            data.x
                         )
+
+                    const y =
+                        Number(
+                            data.y
+                        )
+
+                    const z =
+                        Number(
+                            data.z
+                        )
+
+                    const rotY =
+                        Number(
+                            data.rotY
+                        )
+
+                    if (
+                        !Number.isFinite(
+                            x
+                        ) ||
+                        !Number.isFinite(
+                            y
+                        ) ||
+                        !Number.isFinite(
+                            z
+                        ) ||
+                        !Number.isFinite(
+                            rotY
+                        )
+                    ) {
+                        return
+                    }
+
+                    players[id].x =
+                        x
 
                     players[id].y =
-                        Number(
-                            data.y || 0
-                        )
+                        y
 
                     players[id].z =
-                        Number(
-                            data.z || 0
-                        )
+                        z
 
                     players[id].rotY =
-                        Number(
-                            data.rotY ||
-                                0
-                        )
+                        rotY
 
                     players[id].lastPing =
                         now()
 
-                    broadcastState()
+                    broadcastPlayers()
 
                     return
                 }
@@ -1476,9 +1514,7 @@ wss.on(
                 }
 
                 const currentSocket =
-                    sockets.get(
-                        id
-                    )
+                    sockets.get(id)
 
                 if (
                     currentSocket !==
